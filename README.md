@@ -38,12 +38,6 @@ source for
 [Grafana annotations](http://docs.grafana.org/reference/annotations/), tracking
 something like release events has to happen with some event-logging framework.
 
-A while ago, we
-[decided to not implement a “timeout” or TTL for pushed metrics](https://github.com/prometheus/pushgateway/issues/19)
-because almost all proposed use cases turned out to be anti-patterns we
-strongly discourage. You can follow a more recent discussion on the
-[prometheus-developers mailing list](https://groups.google.com/forum/#!topic/prometheus-developers/9IyUxRvhY7w).
-
 ## Run it
 
 Download binary releases for your platform from the
@@ -616,6 +610,12 @@ using the `--web.config.file` parameter. The format of the file is described
 Note that the TLS and basic authentication settings affect all HTTP endpoints:
 /metrics for scraping, the API to push metrics via /metrics/..., the admin API
 via /api/..., and the web UI.
+
+## About Time-To-Live
+
+It add a parameter `-metric.ttl=Ns` to define the Time-To-Live seconds for each
+metrics. If the metrics is timeout, the metrics will not display at `/metrics`
+request. And all timeout metrics will cleanup periodically (every 60 seconds).
 
 ## Development
 
