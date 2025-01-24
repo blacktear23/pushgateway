@@ -57,6 +57,7 @@ type DiskMetricStore struct {
 	predefinedHelp  map[string]string
 	logger          log.Logger
 	ttl             time.Duration
+	skipGatherCheck bool
 }
 
 type mfStat struct {
@@ -84,6 +85,7 @@ func NewDiskMetricStore(
 	logger log.Logger,
 	ttl time.Duration,
 	numLoops int,
+	skipGatherCheck bool,
 ) *DiskMetricStore {
 	// TODO: Do that outside of the constructor to allow the HTTP server to
 	//  serve /-/healthy and /-/ready earlier.
@@ -95,6 +97,7 @@ func NewDiskMetricStore(
 		persistenceFile: persistenceFile,
 		logger:          logger,
 		ttl:             ttl,
+		skipGatherCheck: skipGatherCheck,
 	}
 	if err := dms.restore(); err != nil {
 		level.Error(logger).Log("msg", "could not load persisted metrics", "err", err)
@@ -213,6 +216,63 @@ func (dms *DiskMetricStore) GetMetricFamilies() []*dto.MetricFamily {
 	requestAt := time.Now()
 
 	for _, group := range dms.metricGroups {
+		for name, tmf := range group.Metrics {
+			// Check timeout
+			if dms.ttl > 0 && tmf.Timestamp.Add(dms.ttl).Before(requestAt) {
+				level.Debug(dms.logger).Log("msg", "Stale metrics values")
+				continue
+			}
+			mf := tmf.GetMetricFamily()
+			if mf == nil {
+				level.Warn(dms.logger).Log("msg", "storage corruption detected, consider wiping the persistence file")
+				continue
+			}
+			stat, exists := mfStatByName[name]
+			if exists {
+				existingMF := result[stat.pos]
+				if !stat.copied {
+					mfStatByName[name] = mfStat{
+						pos:    stat.pos,
+						copied: true,
+					}
+					existingMF = copyMetricFamily(existingMF)
+					result[stat.pos] = existingMF
+				}
+				if mf.GetHelp() != existingMF.GetHelp() {
+					level.Info(dms.logger).Log("msg", "metric families inconsistent help strings", "err", "Metric families have inconsistent help strings. The latter will have priority. This is bad. Fix your pushed metrics!", "new", mf, "old", existingMF)
+				}
+				// Type inconsistency cannot be fixed here. We will detect it during
+				// gathering anyway, so no reason to log anything here.
+				existingMF.Metric = append(existingMF.Metric, mf.Metric...)
+			} else {
+				copied := false
+				if help, ok := dms.predefinedHelp[name]; ok && mf.GetHelp() != help {
+					level.Info(dms.logger).Log("msg", "metric families overlap", "err", "Metric family has the same name as a metric family used by the Pushgateway itself but it has a different help string. Changing it to the standard help string. This is bad. Fix your pushed metrics!", "metric_family", mf, "standard_help", help)
+					mf = copyMetricFamily(mf)
+					copied = true
+					mf.Help = proto.String(help)
+				}
+				mfStatByName[name] = mfStat{
+					pos:    len(result),
+					copied: copied,
+				}
+				result = append(result, mf)
+			}
+		}
+	}
+	return result
+}
+
+// GetMetricFamilies implements the MetricStore interface.
+func (dms *DiskMetricStore) GetMetricFamiliesByGroupName(key string) []*dto.MetricFamily {
+	dms.lock.RLock()
+	defer dms.lock.RUnlock()
+
+	result := []*dto.MetricFamily{}
+	mfStatByName := map[string]mfStat{}
+	requestAt := time.Now()
+
+	if group, ok := dms.metricGroups[key]; ok {
 		for name, tmf := range group.Metrics {
 			// Check timeout
 			if dms.ttl > 0 && tmf.Timestamp.Add(dms.ttl).Before(requestAt) {
@@ -449,7 +509,7 @@ func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool {
 	}
 
 	// Without Done channel, don't do the expensive consistency check.
-	if wr.Done == nil {
+	if wr.Done == nil || dms.skipGatherCheck {
 		return true
 	}
 
@@ -461,12 +521,14 @@ func (dms *DiskMetricStore) checkWriteRequest(wr WriteRequest) bool {
 		logger:         log.NewNopLogger(),
 	}
 	tdms.processWriteRequest(wr)
+	key := groupingKeyFor(wr.Labels)
 
 	// Construct a test Gatherer to check if consistent gathering is possible.
 	tg := prometheus.Gatherers{
 		prometheus.DefaultGatherer,
 		prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
-			return tdms.GetMetricFamilies(), nil
+			// return tdms.GetMetricFamilies(), nil
+			return tdms.GetMetricFamiliesByGroupName(key), nil
 		}),
 	}
 	if _, err = tg.Gather(); err != nil {
