@@ -120,22 +120,53 @@ func (dms *DiskMetricStore) cleanUpLoop(ttl time.Duration) {
 	}
 }
 
+type cleanItem struct {
+	metricID      string
+	group         *MetricGroup
+	keys          []string
+	cleanMetricID bool
+}
+
+func newCleanItem(group *MetricGroup, mid string, keys []string) *cleanItem {
+	return &cleanItem{
+		metricID:      mid,
+		group:         group,
+		keys:          keys,
+		cleanMetricID: false,
+	}
+}
+
 func (dms *DiskMetricStore) cleanTimeoutValues(ttl time.Duration) {
-	dms.lock.RLock()
-	defer dms.lock.RUnlock()
-
 	cleanTime := time.Now()
-
+	cleanItems := []*cleanItem{}
+	dms.lock.RLock()
 	for metricID, group := range dms.metricGroups {
+		cleanKeys := make([]string, 0, 10)
 		for metricName, tmf := range group.Metrics {
 			if tmf.Timestamp.Add(ttl).Before(cleanTime) {
-				delete(group.Metrics, metricName)
+				cleanKeys = append(cleanKeys, metricName)
 			}
 		}
-		if len(group.Metrics) == 0 {
-			delete(dms.metricGroups, metricID)
+		if len(cleanKeys) > 0 || len(group.Metrics) == 0 {
+			citem := newCleanItem(&group, metricID, cleanKeys)
+			if len(group.Metrics)-len(cleanKeys) <= 0 {
+				citem.cleanMetricID = true
+			}
+			cleanItems = append(cleanItems, citem)
 		}
 	}
+	dms.lock.RUnlock()
+	dms.lock.Lock()
+	for _, citem := range cleanItems {
+		if citem.cleanMetricID {
+			delete(dms.metricGroups, citem.metricID)
+			continue
+		}
+		for _, key := range citem.keys {
+			delete(citem.group.Metrics, key)
+		}
+	}
+	dms.lock.Unlock()
 }
 
 // SubmitWriteRequest implements the MetricStore interface.
