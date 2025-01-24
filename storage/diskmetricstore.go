@@ -83,6 +83,7 @@ func NewDiskMetricStore(
 	gatherPredefinedHelpFrom prometheus.Gatherer,
 	logger log.Logger,
 	ttl time.Duration,
+	numLoops int,
 ) *DiskMetricStore {
 	// TODO: Do that outside of the constructor to allow the HTTP server to
 	//  serve /-/healthy and /-/ready earlier.
@@ -104,7 +105,9 @@ func NewDiskMetricStore(
 		level.Error(logger).Log("msg", "could not gather metrics for predefined help strings", "err", err)
 	}
 
-	go dms.loop(persistenceInterval)
+	for i := 0; i < numLoops; i++ {
+		go dms.loop(persistenceInterval)
+	}
 	go dms.cleanUpLoop(ttl)
 	return dms
 }
